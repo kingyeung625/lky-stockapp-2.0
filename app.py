@@ -7,8 +7,8 @@ import re
 def extract_transactions(pdf_file):
     """
     Parses a PDF file to extract stock buy and sell transactions.
-    This version uses a robust text-parsing approach with regular expressions
-    to handle complex layouts where table extraction might fail.
+    This version uses a highly specific regular expression to find and
+    parse transaction lines, making it robust against spacing issues.
 
     Args:
         pdf_file: A file-like object representing the PDF.
@@ -18,6 +18,13 @@ def extract_transactions(pdf_file):
         or None if no transactions are found.
     """
     transactions = []
+    # This regex is designed to find a whole transaction line in one go.
+    # It looks for: Action, Stock Name, Currency, and then four number groups.
+    # It's much more reliable than splitting by spaces.
+    pattern = re.compile(
+        r"^(賣出平倉|買入開倉)\s+(.*?)\s+([A-Z]{3})\s+([\d,.]+\s+[\d,.]+)\s+(-?[\d,.]+)\s+(-?[\d,.]+)$"
+    )
+
     try:
         with pdfplumber.open(pdf_file) as pdf:
             for page in pdf.pages:
@@ -25,27 +32,20 @@ def extract_transactions(pdf_file):
                 if text and "交易-股票和股票期權" in text:
                     lines = text.split('\n')
                     for line in lines:
-                        # Check if the line starts with the specific transaction keywords.
-                        if line.strip().startswith("買入開倉") or line.strip().startswith("賣出平倉"):
+                        match = pattern.search(line.strip())
+                        if match:
                             try:
-                                # Split the line by 2 or more spaces to separate columns.
-                                parts = re.split(r'\s{2,}', line.strip())
-                                
-                                # A valid transaction line should have at least 6 parts after splitting.
-                                if len(parts) < 6:
-                                    continue
+                                action_chinese = match.group(1)
+                                name_code = match.group(2)
+                                currency = match.group(3)
+                                qty_price_str = match.group(4)
+                                amount_str = match.group(5)
+                                change_str = match.group(6)
 
-                                action_chinese = parts[0]
                                 action = "Sell" if "賣出平倉" in action_chinese else "Buy"
-                                
-                                name_code = parts[1]
-                                currency = parts[2]
 
-                                # Quantity and price are in the same part, often separated by a space.
-                                qty_price_parts = parts[3].split()
-                                if len(qty_price_parts) < 2:
-                                    continue
-                                
+                                # --- Parse the numbers ---
+                                qty_price_parts = qty_price_str.split()
                                 val1_str = qty_price_parts[0].replace(',', '')
                                 val2_str = qty_price_parts[1].replace(',', '')
 
@@ -55,12 +55,9 @@ def extract_transactions(pdf_file):
                                 # The value with a decimal point is the price.
                                 price = val1 if '.' in val1_str else val2
                                 quantity = val2 if '.' in val1_str else val1
-                                
-                                amount_str = parts[4].replace(',', '')
-                                change_str = parts[5].replace(',', '')
 
-                                amount = float(amount_str)
-                                change = float(change_str)
+                                amount = float(amount_str.replace(',', ''))
+                                change = float(change_str.replace(',', ''))
 
                                 transactions.append({
                                     "Action": action,
@@ -72,7 +69,7 @@ def extract_transactions(pdf_file):
                                     "Net Change": change
                                 })
                             except (ValueError, IndexError, TypeError):
-                                # If any part of the line parsing fails, just skip to the next line.
+                                # If parsing this specific line fails, skip it and try the next.
                                 continue
         if transactions:
             return pd.DataFrame(transactions)
