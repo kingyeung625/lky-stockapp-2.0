@@ -16,46 +16,47 @@ def extract_transactions(pdf_file):
         or None if no transactions are found.
     """
     transactions = []
-    # Regex to capture the main transaction details.
-    # It looks for "買入開倉" (Buy) or "賣出平倉" (Sell) and captures the subsequent data points.
-    transaction_pattern = re.compile(
-        r"(賣出平倉|買入開倉)\s+([\w\d\(\)\-\s]+)\s+(HKD|USD|CNH)\s+([\d\.]+)\s+(\d+)\s+([\d,\.]+)\s+([-\d,\.]+)"
-    )
-
     try:
         with pdfplumber.open(pdf_file) as pdf:
             for page in pdf.pages:
                 text = page.extract_text(x_tolerance=2, y_tolerance=2)
-                if text:
-                    # Split text into lines to process them individually
+                # We check for a specific header to make sure we're on the right page.
+                if text and "交易-股票和股票期權" in text:
                     lines = text.split('\n')
-                    for i, line in enumerate(lines):
-                        # The keywords "買入開倉" (Buy to open) and "賣出平倉" (Sell to close) indicate a transaction.
+                    for line in lines:
+                        # Transaction lines in this statement start with these specific keywords.
                         if "買入開倉" in line or "賣出平倉" in line:
-                            # Sometimes the full transaction data spans multiple lines in the extracted text.
-                            # We'll join the current and next line to form a more complete string for the regex.
-                            full_line_text = line
-                            if i + 1 < len(lines):
-                                full_line_text += " " + lines[i+1]
+                            # Clean the line: remove quotes and split by comma.
+                            # The PDF extractor formats the table into comma-separated values.
+                            cleaned_line = line.strip().replace('"', '')
+                            parts = [p.strip() for p in cleaned_line.split(',')]
                             
-                            match = transaction_pattern.search(full_line_text.replace('\n', ' '))
-                            if match:
+                            # A valid transaction line should have at least 6 parts.
+                            if len(parts) >= 6:
                                 try:
-                                    action_chinese = match.group(1)
+                                    action_chinese = parts[0]
+                                    if action_chinese not in ["買入開倉", "賣出平倉"]:
+                                        continue
+                                    
                                     action = "Sell" if action_chinese == "賣出平倉" else "Buy"
-                                    name_code = match.group(2).strip()
-                                    currency = match.group(3)
-                                    
-                                    # In the PDF, quantity and price can be swapped in order.
-                                    # We'll check which is which based on typical values.
-                                    val1 = float(match.group(4).replace(',', ''))
-                                    val2 = float(match.group(5).replace(',', ''))
-                                    
-                                    price = val1 if '.' in match.group(4) else val2
-                                    quantity = val2 if '.' in match.group(4) else val1
+                                    name_code = parts[1]
+                                    currency = parts[2]
 
-                                    amount = float(match.group(6).replace(',', ''))
-                                    change = float(match.group(7).replace(',', ''))
+                                    # The fourth part contains quantity and price, separated by a space.
+                                    qty_price_parts = parts[3].split()
+                                    if len(qty_price_parts) != 2:
+                                        continue # Skip if the format is not as expected.
+
+                                    val1_str, val2_str = qty_price_parts
+                                    val1 = float(val1_str.replace(',', ''))
+                                    val2 = float(val2_str.replace(',', ''))
+
+                                    # The value containing a decimal point is the price.
+                                    price = val1 if '.' in val1_str else val2
+                                    quantity = val2 if '.' in val1_str else val1
+                                    
+                                    amount = float(parts[4].replace(',', ''))
+                                    change = float(parts[5].replace(',', ''))
 
                                     transactions.append({
                                         "Action": action,
@@ -67,9 +68,8 @@ def extract_transactions(pdf_file):
                                         "Net Change": change
                                     })
                                 except (ValueError, IndexError):
-                                    # Skip lines that look like transactions but can't be parsed
+                                    # Catches errors from malformed numbers or unexpected structures.
                                     continue
-
         if transactions:
             return pd.DataFrame(transactions)
         else:
@@ -130,3 +130,4 @@ if uploaded_file is not None:
 
 st.markdown("---")
 st.markdown("Created with [Streamlit](https://streamlit.io).")
+
