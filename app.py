@@ -2,12 +2,13 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 from io import BytesIO
+import re
 
 def extract_transactions(pdf_file):
     """
-    Parses a PDF file to extract stock buy and sell transactions by
-    specifically targeting tables within the document. It now correctly
-    handles multi-line entries for a single transaction.
+    Parses a PDF file to extract stock buy and sell transactions.
+    This version uses a robust text-parsing approach with regular expressions
+    to handle complex layouts where table extraction might fail.
 
     Args:
         pdf_file: A file-like object representing the PDF.
@@ -20,67 +21,59 @@ def extract_transactions(pdf_file):
     try:
         with pdfplumber.open(pdf_file) as pdf:
             for page in pdf.pages:
-                # Use extract_text to find the right page first.
                 text = page.extract_text()
                 if text and "交易-股票和股票期權" in text:
-                    # Once on the right page, extract the structured tables.
-                    tables = page.extract_tables()
-                    for table in tables:
-                        for row in table:
-                            # A valid transaction row starts with the action keyword in the first cell.
-                            if row and row[0] and ("買入開倉" in row[0] or "賣出平倉" in row[0]):
-                                try:
-                                    # Ensure the row has enough columns for a transaction
-                                    if len(row) < 6:
-                                        continue
-
-                                    action_chinese = row[0]
-                                    action = "Sell" if "賣出平倉" in action_chinese else "Buy"
-                                    
-                                    # Stock name might have newlines, so we take the first line.
-                                    stock_info = row[1].split('\n') if row[1] else ["Unknown"]
-                                    name_code = stock_info[0]
-
-                                    currency = row[2] if row[2] else "N/A"
-
-                                    # *** CRITICAL FIX ***
-                                    # Quantity and price can be in the same cell, separated by a space or newline.
-                                    # .split() handles any whitespace and is more robust.
-                                    qty_price_parts = row[3].split() if row[3] else ["0", "0"]
-                                    
-                                    # Handle cases where parsing might fail
-                                    if len(qty_price_parts) < 2:
-                                        continue
-                                    
-                                    val1_str = qty_price_parts[0].replace(',', '')
-                                    val2_str = qty_price_parts[1].replace(',', '')
-
-                                    val1 = float(val1_str)
-                                    val2 = float(val2_str)
-
-                                    # The value with a decimal point is almost always the price.
-                                    price = val1 if '.' in val1_str else val2
-                                    quantity = val2 if '.' in val1_str else val1
-                                    
-                                    amount_str = row[4].replace(',', '') if row[4] else "0"
-                                    change_str = row[5].replace(',', '') if row[5] else "0"
-
-                                    amount = float(amount_str)
-                                    change = float(change_str)
-
-                                    transactions.append({
-                                        "Action": action,
-                                        "Stock Name": name_code,
-                                        "Quantity": int(quantity),
-                                        "Price": price,
-                                        "Amount": amount,
-                                        "Currency": currency,
-                                        "Net Change": change
-                                    })
-                                except (ValueError, IndexError, TypeError):
-                                    # This will catch errors from malformed cells or unexpected data types
-                                    # and allow the loop to continue to the next row.
+                    lines = text.split('\n')
+                    for line in lines:
+                        # Check if the line starts with the specific transaction keywords.
+                        if line.strip().startswith("買入開倉") or line.strip().startswith("賣出平倉"):
+                            try:
+                                # Split the line by 2 or more spaces to separate columns.
+                                parts = re.split(r'\s{2,}', line.strip())
+                                
+                                # A valid transaction line should have at least 6 parts after splitting.
+                                if len(parts) < 6:
                                     continue
+
+                                action_chinese = parts[0]
+                                action = "Sell" if "賣出平倉" in action_chinese else "Buy"
+                                
+                                name_code = parts[1]
+                                currency = parts[2]
+
+                                # Quantity and price are in the same part, often separated by a space.
+                                qty_price_parts = parts[3].split()
+                                if len(qty_price_parts) < 2:
+                                    continue
+                                
+                                val1_str = qty_price_parts[0].replace(',', '')
+                                val2_str = qty_price_parts[1].replace(',', '')
+
+                                val1 = float(val1_str)
+                                val2 = float(val2_str)
+
+                                # The value with a decimal point is the price.
+                                price = val1 if '.' in val1_str else val2
+                                quantity = val2 if '.' in val1_str else val1
+                                
+                                amount_str = parts[4].replace(',', '')
+                                change_str = parts[5].replace(',', '')
+
+                                amount = float(amount_str)
+                                change = float(change_str)
+
+                                transactions.append({
+                                    "Action": action,
+                                    "Stock Name": name_code,
+                                    "Quantity": int(quantity),
+                                    "Price": price,
+                                    "Amount": amount,
+                                    "Currency": currency,
+                                    "Net Change": change
+                                })
+                            except (ValueError, IndexError, TypeError):
+                                # If any part of the line parsing fails, just skip to the next line.
+                                continue
         if transactions:
             return pd.DataFrame(transactions)
         else:
